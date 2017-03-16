@@ -1036,7 +1036,9 @@
 		default_effect = <17>;          /* Strong Click 100% */
 		rated_voltage = <0x70>;         /* 2.4v */
 		overdrive_voltage = <0x89>;     /* 3.0v */
+		disable_calibration  = <2>;     /* Disable boot-up calibration */
 		static-vdd-supply = <&hdmi_vreg>;
+		calibration-data = <0x08 0xA1 0x27 0x93 0xf5>;
 	};
 };
 
@@ -1115,8 +1117,8 @@
 		lux_table = <5 50 100 1500 3000 8000>;
 		brightness_table = <9 14 18 46 67 93 140>;
 		bslen_pin_active_value = <1>;
-		ct406_detect_threshold = <0x006E>;
-		ct406_undetect_threshold = <0x0050>;
+		ct406_detect_threshold = <0x0104>;
+		ct406_undetect_threshold = <0x00D2>;
 		ct406_recalibrate_threshold = <0x0064>;
 		ct406_pulse_count = <0x04>;
 		sensor1-supply = <&pma8084_lvs1>;
