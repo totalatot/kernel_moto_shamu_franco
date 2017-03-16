@@ -30,22 +30,20 @@
 #include <linux/input-polldev.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
+#include <linux/ktime.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
 #include <linux/poll.h>
-#include <linux/pm_runtime.h>
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
 #include <linux/switch.h>
+#include <linux/sysfs.h>
 #include <linux/time.h>
 #include <linux/uaccess.h>
 #include <linux/wakelock.h>
 #include <linux/workqueue.h>
 
 #include <linux/stm401.h>
-
-
-#define NAME			     "stm401"
 
 #define I2C_RETRIES			5
 #define RESET_RETRIES			2
@@ -67,6 +65,8 @@ unsigned short stm401_i2c_retry_delay = 13;
 unsigned short stm401_g_acc_delay;
 unsigned short stm401_g_mag_delay;
 unsigned short stm401_g_gyro_delay;
+uint8_t stm401_g_rv_6axis_delay = 40;
+uint8_t stm401_g_rv_9axis_delay = 40;
 unsigned short stm401_g_baro_delay;
 unsigned short stm401_g_step_counter_delay;
 unsigned short stm401_g_ir_gesture_delay;
@@ -107,6 +107,145 @@ const struct stm401_algo_info_t stm401_algo_info[STM401_NUM_ALGOS] = {
 };
 
 struct stm401_data *stm401_misc_data;
+
+/* STM401 sysfs functions/attributes */
+
+/* Attribute: timestamp_time_ns (RO) */
+static ssize_t timestamp_time_ns_show(
+	struct device *dev,
+	struct device_attribute *attr,
+	char *buf)
+{
+	*((uint64_t *)buf) = stm401_timestamp_ns();
+	return sizeof(uint64_t);
+}
+
+/* Attribute: rv_6axis_update_rate (RW) */
+static ssize_t rv_6axis_update_rate_show(
+	struct device *dev,
+	struct device_attribute *attr,
+	char *buf)
+{
+	*((uint8_t *)buf) = stm401_g_rv_6axis_delay;
+	return sizeof(uint8_t);
+}
+static ssize_t rv_6axis_update_rate_store(
+	struct device *dev,
+	struct device_attribute *attr,
+	const char *buf,
+	size_t count)
+{
+	int err = 0;
+	if (count < 1)
+		return -EINVAL;
+	err = stm401_set_rv_6axis_update_rate(
+		stm401_misc_data,
+		*((uint8_t *)buf));
+	if (err)
+		return err;
+	else
+		return sizeof(uint8_t);
+}
+
+/* Attribute: rv_9axis_update_rate (RW) */
+static ssize_t rv_9axis_update_rate_show(
+	struct device *dev,
+	struct device_attribute *attr,
+	char *buf)
+{
+	*((uint8_t *)buf) = stm401_g_rv_9axis_delay;
+	return sizeof(uint8_t);
+}
+static ssize_t rv_9axis_update_rate_store(
+	struct device *dev,
+	struct device_attribute *attr,
+	const char *buf,
+	size_t count)
+{
+	int err = 0;
+	if (count < 1)
+		return -EINVAL;
+	err = stm401_set_rv_9axis_update_rate(
+		stm401_misc_data,
+		*((uint8_t *)buf));
+	if (err)
+		return err;
+	else
+		return sizeof(uint8_t);
+}
+
+static struct device_attribute stm401_attributes[] = {
+	__ATTR_RO(timestamp_time_ns),
+	__ATTR(
+		rv_6axis_update_rate,
+		0664,
+		rv_6axis_update_rate_show,
+		rv_6axis_update_rate_store),
+	__ATTR(
+		rv_9axis_update_rate,
+		0664,
+		rv_9axis_update_rate_show,
+		rv_9axis_update_rate_store),
+	__ATTR_NULL
+};
+
+static int create_device_attributes(
+	struct device *dev,
+	struct device_attribute *attrs)
+{
+	int i;
+	int err = 0;
+
+	for (i = 0; attrs[i].attr.name != NULL; ++i) {
+		err = device_create_file(dev, &attrs[i]);
+		if (err)
+			break;
+	}
+
+	if (err) {
+		for (--i; i >= 0; --i)
+			device_remove_file(dev, &attrs[i]);
+	}
+
+	return err;
+}
+
+static void remove_device_attributes(
+	struct device *dev,
+	struct device_attribute *attrs)
+{
+	int i;
+
+	for (i = 0; attrs[i].attr.name != NULL; ++i)
+		device_remove_file(dev, &attrs[i]);
+}
+
+static int create_sysfs_interfaces(struct stm401_data *ps_stm401)
+{
+	int err = 0;
+
+	if (!ps_stm401)
+		return -EINVAL;
+
+	err = create_device_attributes(
+		ps_stm401->stm401_class_dev,
+		stm401_attributes);
+
+	if (err < 0)
+		remove_device_attributes(
+			ps_stm401->stm401_class_dev,
+			stm401_attributes);
+	return err;
+}
+
+/* END: STM401 sysfs functions/attributes */
+
+int64_t stm401_timestamp_ns(void)
+{
+	struct timespec ts;
+	get_monotonic_boottime(&ts);
+	return ts.tv_sec*1000000000LL + ts.tv_nsec;
+}
 
 void stm401_wake(struct stm401_data *ps_stm401)
 {
@@ -753,55 +892,8 @@ static int stm401_gpio_init(struct stm401_platform_data *pdata,
 		pr_warn("%s: gpio wake irq not specified\n", __func__);
 	}
 
-#if 0
-	if (gpio_is_valid(pdata->gpio_mipi_req)) {
-		err = gpio_request(pdata->gpio_mipi_req, "mipi_d0_req");
-		if (err) {
-			dev_err(&stm401_misc_data->client->dev,
-				"mipi_req_gpio gpio_request failed: %d\n", err);
-			goto free_wakeirq;
-		}
-		gpio_direction_output(pdata->gpio_mipi_req, 0);
-		err = gpio_export(pdata->gpio_mipi_req, 0);
-		if (err) {
-			dev_err(&stm401_misc_data->client->dev,
-				"mipi_req_gpio gpio_export failed: %d\n", err);
-			goto free_mipi_req;
-		}
-		stm401_misc_data->ap_stm401_handoff_ctrl = true;
-	} else {
-		stm401_misc_data->ap_stm401_handoff_ctrl = false;
-		pr_warn("%s: gpio mipi req not specified\n", __func__);
-	}
-
-	if (gpio_is_valid(pdata->gpio_mipi_busy)) {
-		err = gpio_request(pdata->gpio_mipi_busy, "mipi_d0_busy");
-		if (err) {
-			dev_err(&stm401_misc_data->client->dev,
-				"mipi_d0_busy gpio_request failed: %d\n", err);
-			goto free_mipi_req;
-		}
-		gpio_direction_input(pdata->gpio_mipi_busy);
-		err = gpio_export(pdata->gpio_mipi_busy, 0);
-		if (err) {
-			dev_err(&stm401_misc_data->client->dev,
-				"mipi_d0_busy gpio_export failed: %d\n", err);
-			goto free_mipi_busy;
-		}
-	} else {
-		stm401_misc_data->ap_stm401_handoff_ctrl = false;
-		pr_warn("%s: gpio mipi busy not specified\n", __func__);
-	}
-#endif
-
 	return 0;
 
-#if 0
-free_mipi_busy:
-	gpio_free(pdata->gpio_mipi_busy);
-free_mipi_req:
-	gpio_free(pdata->gpio_mipi_req);
-#endif
 free_wakeirq:
 	gpio_free(pdata->gpio_wakeirq);
 free_sh_wake_resp:
@@ -856,6 +948,63 @@ void clear_interrupt_status_work_func(struct work_struct *work)
 EXIT:
 	mutex_unlock(&ps_stm401->lock);
 }
+
+#if defined(CONFIG_FB)
+static int stm401_fb_notifier_callback(struct notifier_block *self,
+	unsigned long event, void *data)
+{
+	struct fb_event *evdata = data;
+	struct stm401_data *ps_stm401 = container_of(self, struct stm401_data,
+		fb_notif);
+	int blank;
+	bool vote = false;
+
+	dev_dbg(&ps_stm401->client->dev, "%s+\n", __func__);
+
+	if ((event != FB_EVENT_BLANK && event != FB_EARLY_EVENT_BLANK) ||
+	    !evdata || !evdata->data)
+		goto exit;
+
+	blank = *(int *)evdata->data;
+
+	/* determine vote */
+	switch (event) {
+	case FB_EVENT_BLANK:
+		if (blank == FB_BLANK_UNBLANK)
+			goto exit; /* not interested in this event */
+		else
+			vote = true;
+		break;
+	case FB_EARLY_EVENT_BLANK:
+		if (blank == FB_BLANK_UNBLANK)
+			vote = false;
+		else
+			goto exit; /* not interested in these events */
+		break;
+	default:
+		goto exit;
+	}
+
+	if (ps_stm401->in_reset_and_init || ps_stm401->mode == BOOTMODE) {
+		/* store the kernel's vote */
+		stm401_store_vote_aod_enabled(ps_stm401,
+				AOD_QP_ENABLED_VOTE_KERN, vote);
+		dev_warn(&ps_stm401->client->dev, "stm401 in reset or BOOTMODE...bailing\n");
+		goto exit;
+	} else {
+		mutex_lock(&ps_stm401->lock);
+		stm401_vote_aod_enabled_locked(ps_stm401,
+			AOD_QP_ENABLED_VOTE_KERN, vote);
+		stm401_resolve_aod_enabled_locked(ps_stm401);
+		mutex_unlock(&ps_stm401->lock);
+	}
+
+exit:
+	dev_dbg(&ps_stm401->client->dev, "%s-\n", __func__);
+
+	return 0;
+}
+#endif
 
 static int stm401_probe(struct i2c_client *client,
 			   const struct i2c_device_id *id)
@@ -933,7 +1082,7 @@ static int stm401_probe(struct i2c_client *client,
 	wake_lock_init(&ps_stm401->reset_wakelock, WAKE_LOCK_SUSPEND,
 		"stm401_reset");
 
-	ps_stm401->ap_stm401_handoff_enable = false;
+	mutex_init(&ps_stm401->aod_enabled.vote_lock);
 
 	/* Set to passive mode by default */
 	stm401_g_nonwake_sensor_state = 0;
@@ -1001,9 +1150,16 @@ static int stm401_probe(struct i2c_client *client,
 		dev_err(&client->dev,
 			"cdev_add as failed: %d\n", err);
 
-	device_create(ps_stm401->stm401_class, NULL,
+	ps_stm401->stm401_class_dev = device_create(
+		ps_stm401->stm401_class, NULL,
 		MKDEV(MAJOR(ps_stm401->stm401_dev_num), 0),
 		ps_stm401, "stm401_as");
+
+	err = create_sysfs_interfaces(ps_stm401);
+	if (err)
+		dev_err(&client->dev,
+			"create_sysfs_interfaces failed: %d",
+			err);
 
 	cdev_init(&ps_stm401->ms_cdev, &stm401_ms_fops);
 	ps_stm401->ms_cdev.owner = THIS_MODULE;
@@ -1083,16 +1239,56 @@ static int stm401_probe(struct i2c_client *client,
 		goto err9;
 	}
 
-	pm_runtime_enable(&client->dev);
+#if defined(CONFIG_FB)
+	ps_stm401->fb_notif.notifier_call = stm401_fb_notifier_callback;
+	err = fb_register_client(&ps_stm401->fb_notif);
+	if (err) {
+		dev_err(&client->dev,
+			"Error registering fb_notifier: %d\n", err);
+		goto err10;
+	}
+#endif
+
+	ps_stm401->quickpeek_work_queue =
+		create_singlethread_workqueue("stm401_quickpeek_wq");
+	if (!ps_stm401->quickpeek_work_queue) {
+		err = -ENOMEM;
+		dev_err(&client->dev, "cannot create work queue: %d\n", err);
+		goto err11;
+	}
+	INIT_WORK(&ps_stm401->quickpeek_work, stm401_quickpeek_work_func);
+	wake_lock_init(&ps_stm401->quickpeek_wakelock, WAKE_LOCK_SUSPEND,
+		"stm401_quickpeek");
+	INIT_LIST_HEAD(&ps_stm401->quickpeek_command_list);
+	atomic_set(&ps_stm401->qp_enabled, 0);
+	ps_stm401->qp_in_progress = false;
+	ps_stm401->qp_prepared = false;
+	init_waitqueue_head(&ps_stm401->quickpeek_wait_queue);
+
+	ps_stm401->ignore_wakeable_interrupts = false;
+	ps_stm401->ignored_interrupts = 0;
+	ps_stm401->quickpeek_occurred = false;
+	mutex_init(&ps_stm401->qp_list_lock);
+
+	stm401_quickwakeup_init(ps_stm401);
+
+	ps_stm401->is_suspended = false;
 
 	switch_stm401_mode(NORMALMODE);
 
 	mutex_unlock(&ps_stm401->lock);
 
+	ps_stm401->hall_data = mmi_hall_init();
+
 	dev_info(&client->dev, "probed finished\n");
 
 	return 0;
 
+err11:
+#if defined(CONFIG_FB)
+	fb_unregister_client(&ps_stm401->fb_notif);
+err10:
+#endif
 err9:
 	input_free_device(ps_stm401->input_dev);
 err8:
@@ -1153,20 +1349,43 @@ static int stm401_remove(struct i2c_client *client)
 	regulator_disable(ps_stm401->regulator_1);
 	regulator_put(ps_stm401->regulator_2);
 	regulator_put(ps_stm401->regulator_1);
+#if defined(CONFIG_FB)
+	fb_unregister_client(&ps_stm401->fb_notif);
+#endif
 	kfree(ps_stm401);
 
 	return 0;
 }
 
+static void stm401_process_ignored_interrupts_locked(
+						struct stm401_data *ps_stm401)
+{
+	dev_dbg(&ps_stm401->client->dev, "%s\n", __func__);
+
+	ps_stm401->ignore_wakeable_interrupts = false;
+
+	if (ps_stm401->ignored_interrupts) {
+		ps_stm401->ignored_interrupts = 0;
+		wake_lock_timeout(&ps_stm401->wakelock, HZ);
+		queue_work(ps_stm401->irq_work_queue,
+			&ps_stm401->irq_wake_work);
+	}
+}
+
 static int stm401_resume(struct device *dev)
 {
-	struct i2c_client *client = to_i2c_client(dev);
-	struct stm401_data *ps_stm401 = i2c_get_clientdata(client);
-	int count = 0, level = 0;
-	int stm401_req = ps_stm401->pdata->gpio_mipi_req;
-	int stm401_busy = ps_stm401->pdata->gpio_mipi_busy;
-	dev_dbg(&stm401_misc_data->client->dev, "stm401_resume\n");
+	struct stm401_data *ps_stm401 = i2c_get_clientdata(to_i2c_client(dev));
+	dev_dbg(dev, "%s\n", __func__);
+
 	mutex_lock(&ps_stm401->lock);
+
+	/* During a quickwake interrupts will be set as ignored at the end of
+	   quickpeek_work_func while the system is being re-suspended.  It is
+	   possible for the quickwake suspend process to fail and the system to
+	   be immediately resumed.  Since resume_early was already called before
+	   the quickwake started (and therefore before quickpeek_work_func
+	   disabled interrupts) we must re-enable interrupts here. */
+	stm401_process_ignored_interrupts_locked(ps_stm401);
 
 	ps_stm401->is_suspended = false;
 
@@ -1176,96 +1395,88 @@ static int stm401_resume(struct device *dev)
 		ps_stm401->pending_wake_work = false;
 	}
 
-	if ((ps_stm401->ap_stm401_handoff_enable)
-		&& (ps_stm401->ap_stm401_handoff_ctrl)) {
-		gpio_set_value(stm401_req, 0);
-		dev_dbg(&ps_stm401->client->dev, "STM401 REQ is set %d\n",
-			 gpio_get_value(stm401_req));
-	}
-
 	if (stm401_irq_disable == 0)
 		queue_work(ps_stm401->irq_work_queue,
 			&ps_stm401->clear_interrupt_status_work);
 
-	if ((ps_stm401->ap_stm401_handoff_enable)
-		&& (ps_stm401->ap_stm401_handoff_ctrl)) {
-		do {
-			usleep_range(STM401_BUSY_SLEEP_USEC,
-					 STM401_BUSY_SLEEP_USEC);
-			level = gpio_get_value(stm401_busy);
-			count++;
-		} while ((level) && (count < STM401_BUSY_RESUME_COUNT));
+	mutex_unlock(&ps_stm401->lock);
 
-		if (count == STM401_BUSY_RESUME_COUNT)
-			dev_err(&ps_stm401->client->dev,
-				"timedout while waiting for STM401 BUSY LOW\n");
-	}
-	ps_stm401->ap_stm401_handoff_enable = false;
+	return 0;
+}
+
+static int stm401_resume_early(struct device *dev)
+{
+	struct stm401_data *ps_stm401 = i2c_get_clientdata(to_i2c_client(dev));
+	dev_dbg(dev, "%s\n", __func__);
+
+	mutex_lock(&ps_stm401->lock);
+
+	/* If we received wakeable interrupts between suspend_late and
+	   suspend_noirq, we need to reschedule the irq work to be handled now
+	   that interrupts have been re-enabled. */
+	stm401_process_ignored_interrupts_locked(ps_stm401);
 
 	mutex_unlock(&ps_stm401->lock);
+
 	return 0;
 }
 
 static int stm401_suspend(struct device *dev)
 {
-	struct i2c_client *client = to_i2c_client(dev);
-	struct stm401_data *ps_stm401 = i2c_get_clientdata(client);
-	int count = 0, level = 0;
-	int stm401_req = ps_stm401->pdata->gpio_mipi_req;
-	int stm401_busy = ps_stm401->pdata->gpio_mipi_busy;
+	struct stm401_data *ps_stm401 = i2c_get_clientdata(to_i2c_client(dev));
+	dev_dbg(dev, "%s\n", __func__);
 
-	dev_dbg(&ps_stm401->client->dev, "stm401_suspend\n");
 	mutex_lock(&ps_stm401->lock);
-
 	ps_stm401->is_suspended = true;
-
-	if ((ps_stm401->ap_stm401_handoff_enable)
-		 && (ps_stm401->ap_stm401_handoff_ctrl)) {
-
-		gpio_set_value(stm401_req, 1);
-		dev_dbg(&ps_stm401->client->dev, "STM401 REQ is set %d\n",
-			 gpio_get_value(stm401_req));
-
-		do {
-			usleep_range(STM401_BUSY_SLEEP_USEC,
-				STM401_BUSY_SLEEP_USEC);
-			level = gpio_get_value(stm401_busy);
-			count++;
-		} while ((!level) && (count < STM401_BUSY_SUSPEND_COUNT));
-
-		if (count == STM401_BUSY_SUSPEND_COUNT)
-			dev_err(&ps_stm401->client->dev,
-				"timedout while waiting for STM401 BUSY HIGH\n");
-	}
-
 	mutex_unlock(&ps_stm401->lock);
+
 	return 0;
 }
 
-#ifdef CONFIG_PM_RUNTIME
-static int stm401_runtime_resume(struct device *dev)
+static int stm401_suspend_late(struct device *dev)
 {
-	struct i2c_client *client = to_i2c_client(dev);
-	struct stm401_data *ps_stm401 = i2c_get_clientdata(client);
-	dev_err(&ps_stm401->client->dev, "stm401_runtime_resume\n");
-	return stm401_resume(dev);
+	struct stm401_data *ps_stm401 = i2c_get_clientdata(to_i2c_client(dev));
+	dev_dbg(dev, "%s\n", __func__);
+
+	if (!wait_event_timeout(ps_stm401->quickpeek_wait_queue,
+		stm401_quickpeek_disable_when_idle(ps_stm401),
+		msecs_to_jiffies(STM401_LATE_SUSPEND_TIMEOUT)))
+		return -EBUSY;
+
+	return 0;
 }
 
-static int stm401_runtime_suspend(struct device *dev)
+static int stm401_suspend_noirq(struct device *dev)
 {
-	struct i2c_client *client = to_i2c_client(dev);
-	struct stm401_data *ps_stm401 = i2c_get_clientdata(client);
-	dev_err(&ps_stm401->client->dev, "stm401_runtime_suspend\n");
-	return stm401_suspend(dev);
+	struct stm401_data *ps_stm401 = i2c_get_clientdata(to_i2c_client(dev));
+	int ret = 0;
+
+	dev_dbg(dev, "%s\n", __func__);
+
+	mutex_lock(&ps_stm401->lock);
+
+	/* If we received wakeable interrupts between finishing a quickwake and
+	   now, return an error so we will resume to process it instead of
+	   dropping into suspend */
+	if (ps_stm401->ignored_interrupts) {
+		dev_info(dev,
+			"Force system resume to handle deferred interrupts [%d]\n",
+			ps_stm401->ignored_interrupts);
+		ret = -EBUSY;
+	}
+
+	ps_stm401->quickpeek_occurred = false;
+
+	mutex_unlock(&ps_stm401->lock);
+
+	return ret;
 }
-#endif
 
 static const struct dev_pm_ops stm401_pm_ops = {
-	SET_SYSTEM_SLEEP_PM_OPS(stm401_suspend,
-						stm401_resume)
-	SET_RUNTIME_PM_OPS(stm401_runtime_suspend,
-						stm401_runtime_resume,
-						NULL)
+	SET_SYSTEM_SLEEP_PM_OPS(stm401_suspend, stm401_resume)
+	.suspend_late = stm401_suspend_late,
+	.suspend_noirq = stm401_suspend_noirq,
+	.resume_early = stm401_resume_early,
 };
 
 static const struct i2c_device_id stm401_id[] = {
