@@ -81,17 +81,23 @@ void stm401_reset(struct stm401_platform_data *pdata, unsigned char *cmdbuff)
 	gpio_set_value(pdata->gpio_reset, 1);
 	msleep(STM401_RESET_DELAY);
 	stm401_detect_lowpower_mode(cmdbuff);
+
+	if (!stm401_misc_data->in_reset_and_init) {
+		/* sending reset to slpc hal */
+		stm401_ms_data_buffer_write(stm401_misc_data, DT_RESET,
+			NULL, 0);
+	}
 }
 
 int stm401_reset_and_init(void)
 {
 	struct stm401_platform_data *pdata;
 	struct timespec current_time;
-	int stm401_req_gpio;
-	int stm401_req_value;
 	unsigned int i;
-	int err, ret_err = 0;
+	int err = 0, ret_err = 0;
+	int reset_attempts = 0;
 	unsigned char *rst_cmdbuff = kmalloc(512, GFP_KERNEL);
+	int mutex_locked = 0;
 
 	dev_dbg(&stm401_misc_data->client->dev, "stm401_reset_and_init\n");
 
@@ -100,32 +106,38 @@ int stm401_reset_and_init(void)
 
 	wake_lock(&stm401_misc_data->reset_wakelock);
 
-	if (stm401_misc_data->is_suspended)
-		goto EXIT;
+	stm401_misc_data->in_reset_and_init = true;
 
 	pdata = stm401_misc_data->pdata;
 
-	if (stm401_misc_data->ap_stm401_handoff_ctrl) {
-		stm401_req_gpio = pdata->gpio_mipi_req;
-		stm401_req_value = gpio_get_value(stm401_req_gpio);
-		if (stm401_req_value)
-			gpio_set_value(stm401_req_gpio, 0);
-	} else {
-		stm401_req_value = 0;
-	}
-
-	stm401_reset(pdata, rst_cmdbuff);
-	stm401_i2c_retry_delay = 200;
+	mutex_locked = mutex_trylock(&stm401_misc_data->lock);
+	stm401_quickpeek_reset_locked(stm401_misc_data, false);
+	if (mutex_locked)
+		mutex_unlock(&stm401_misc_data->lock);
 
 	stm401_wake(stm401_misc_data);
+
+	do {
+		stm401_reset(pdata, rst_cmdbuff);
+
+		stm401_i2c_retry_delay = 200;
+
+		/* check for sign of life */
+		rst_cmdbuff[0] = REV_ID;
+		err = stm401_i2c_write_read_no_reset(stm401_misc_data,
+			rst_cmdbuff, 1, 1);
+		if (err < 0)
+			dev_err(&stm401_misc_data->client->dev, "stm401 not responding after reset (%d)",
+				reset_attempts);
+	} while (reset_attempts++ < 5 && err < 0);
+
+	stm401_i2c_retry_delay = 13;
 
 	rst_cmdbuff[0] = ACCEL_UPDATE_RATE;
 	rst_cmdbuff[1] = stm401_g_acc_delay;
 	err = stm401_i2c_write_no_reset(stm401_misc_data, rst_cmdbuff, 2);
 	if (err < 0)
 		ret_err = err;
-
-	stm401_i2c_retry_delay = 13;
 
 	rst_cmdbuff[0] = MAG_UPDATE_RATE;
 	rst_cmdbuff[1] = stm401_g_mag_delay;
@@ -204,10 +216,6 @@ int stm401_reset_and_init(void)
 				ret_err = err;
 		}
 	}
-	rst_cmdbuff[0] = INTERRUPT_STATUS;
-	stm401_i2c_write_read_no_reset(stm401_misc_data, rst_cmdbuff, 1, 3);
-	rst_cmdbuff[0] = WAKESENSOR_STATUS;
-	stm401_i2c_write_read_no_reset(stm401_misc_data, rst_cmdbuff, 1, 2);
 
 	rst_cmdbuff[0] = PROX_SETTINGS;
 	rst_cmdbuff[1]
@@ -231,36 +239,21 @@ int stm401_reset_and_init(void)
 	if (err < 0)
 		ret_err = err;
 
-	if (stm401_req_value) {
-		getnstimeofday(&current_time);
-		current_time.tv_sec += stm401_time_delta;
+	getnstimeofday(&current_time);
+	current_time.tv_sec += stm401_time_delta;
 
-		rst_cmdbuff[0] = AP_POSIX_TIME;
-		rst_cmdbuff[1] = (unsigned char)(current_time.tv_sec >> 24);
-		rst_cmdbuff[2] = (unsigned char)((current_time.tv_sec >> 16)
-			& 0xff);
-		rst_cmdbuff[3] = (unsigned char)((current_time.tv_sec >> 8)
-			& 0xff);
-		rst_cmdbuff[4] = (unsigned char)((current_time.tv_sec)
-			& 0xff);
-		err = stm401_i2c_write_no_reset(stm401_misc_data,
-						rst_cmdbuff, 5);
-		if (err < 0)
-			ret_err = err;
-
-		if (stm401_g_control_reg_restore) {
-			rst_cmdbuff[0] = STM401_CONTROL_REG;
-			memcpy(&rst_cmdbuff[1], stm401_g_control_reg,
-				STM401_CONTROL_REG_SIZE);
-			err = stm401_i2c_write_no_reset(stm401_misc_data,
-				rst_cmdbuff,
-				STM401_CONTROL_REG_SIZE);
-			if (err < 0)
-				ret_err = err;
-		}
-
-		gpio_set_value(stm401_req_gpio, 1);
-	}
+	rst_cmdbuff[0] = AP_POSIX_TIME;
+	rst_cmdbuff[1] = (unsigned char)(current_time.tv_sec >> 24);
+	rst_cmdbuff[2] = (unsigned char)((current_time.tv_sec >> 16)
+		& 0xff);
+	rst_cmdbuff[3] = (unsigned char)((current_time.tv_sec >> 8)
+		& 0xff);
+	rst_cmdbuff[4] = (unsigned char)((current_time.tv_sec)
+		& 0xff);
+	err = stm401_i2c_write_no_reset(stm401_misc_data,
+					rst_cmdbuff, 5);
+	if (err < 0)
+		ret_err = err;
 
 	rst_cmdbuff[0] = MAG_CAL;
 	memcpy(&rst_cmdbuff[1], stm401_g_mag_cal, STM401_MAG_CAL_SIZE);
@@ -284,9 +277,9 @@ int stm401_reset_and_init(void)
 	stm401_ms_data_buffer_write(stm401_misc_data, DT_RESET,
 		NULL, 0);
 
-EXIT:
 	kfree(rst_cmdbuff);
 	stm401_sleep(stm401_misc_data);
+	stm401_misc_data->in_reset_and_init = false;
 	wake_unlock(&stm401_misc_data->reset_wakelock);
 	return ret_err;
 }
