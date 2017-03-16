@@ -17,8 +17,8 @@
 #include "dsi-panel-mot-smd-596-QHD-cmd.dtsi"
 
 / {
-	model = "Motorola APQ 8084 Shamu";
-	compatible = "qcom,apq8084-shamu",
+	model = "Motorola APQ 8084 X Pro China";
+	compatible = "qcom,apq8084-shamu_t",
 		   "qcom,apq8084-moto",
 		   "qcom,apq8084";
 
@@ -313,6 +313,7 @@
 };
 
 &mdss_dsi0 {
+	mmi,mipi-d0-sel = <&msmgpio 14 0>;
 	qcom,dsi-pref-prim-pan = <&mot_smd_596_QHD_0_cmd_v0>;
 	qcom,platform-reset-gpio = <&msmgpio 86 0>;
 	qcom,platform-te-gpio = <&msmgpio 12 0>;
@@ -410,6 +411,8 @@
 
 &mot_smd_596_QHD_0_cmd_v0 {
 	qcom,cont-splash-enabled;
+	mmi,partial-mode-enabled;
+	mmi,quickdraw-enabled;
 	qcom,partial-update-enabled;
 	qcom,panel-roi-alignment = <8 8 1 1 8 1>;
 	qcom,partial-update-roi-merge;
@@ -418,6 +421,8 @@
 
 &mot_smd_596_QHD_1_cmd_v0 {
 	qcom,cont-splash-enabled;
+	mmi,partial-mode-enabled;
+	mmi,quickdraw-enabled;
 	qcom,partial-update-enabled;
 	qcom,panel-roi-alignment = <8 8 1 1 8 1>;
 	qcom,partial-update-roi-merge;
@@ -425,7 +430,6 @@
 };
 
 &i2c_1 {
-	/delete-node/ drv2605@5a;
 	/delete-node/ synaptics_dsx_i2c@20;
 
 	atmel_mxt_ts@4a {
@@ -459,21 +463,6 @@
 				 <0x0100000 0x72>; /* SND_JACK_BTN_6 - KEY_VOLUMEDOWN */
 	};
 
-	/* TI drv2605 */
-	drv2605@5a {
-		compatible = "ti,drv2605";
-		reg = <0x5A>;
-		gpios = <&msmgpio 75 0>,        /* EN_GPIO */
-			<&msmgpio 74 0>;        /* Trigger */
-		external_trigger = <1>;
-		default_effect = <17>;          /* Strong Click 100% */
-		rated_voltage = <0x70>;         /* 2.4v */
-		overdrive_voltage = <0x89>;     /* 3.0v */
-		disable_calibration  = <2>;     /* Disable boot-up calibration */
-		static-vdd-supply = <&hdmi_vreg>;
-		calibration-data = <0x08 0xA1 0x27 0x93 0xf5>;
-	};
-
 	tfa9890@34 {
 		compatible = "nxp,tfa9890";
 		reg = <0x34>;
@@ -495,7 +484,6 @@
 
 
 &i2c_12 {
-	/delete-node/ stm401@39;
 };
 
 &spi_0 {
@@ -518,6 +506,8 @@
 			&wlan_enable_default
 			&nfc_irq_default
 			&nfc_ven_default
+			&stm401_in_default
+			&stm401_out_default
 			&msm_pcie_default
 			&blsp1_uart6_default
 			&c55_ap_int_default
