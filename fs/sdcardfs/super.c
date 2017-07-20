@@ -201,8 +201,13 @@ static int sdcardfs_show_options(struct seq_file *m, struct dentry *root)
 		seq_printf(m, ",gid=%u", opts->fs_low_gid);
 
 	if (opts->multiuser)
-		seq_printf(m, ",multiuser");
-
+		seq_puts(m, ",multiuser");
+	if (vfsopts->mask)
+		seq_printf(m, ",mask=%u", vfsopts->mask);
+	if (opts->fs_user_id)
+		seq_printf(m, ",userid=%u", opts->fs_user_id);
+	if (opts->gid_derivation)
+		seq_puts(m, ",derive_gid");
 	if (opts->reserved_mb != 0)
 		seq_printf(m, ",reserved=%uMB", opts->reserved_mb);
 

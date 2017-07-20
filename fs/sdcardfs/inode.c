@@ -30,7 +30,15 @@ const struct cred * override_fsids(struct sdcardfs_sb_info* sbi)
 	if (!cred)
 		return NULL;
 
-	cred->fsuid = sbi->options.fs_low_uid;
+	if (sbi->options.gid_derivation) {
+		if (data->under_obb)
+			uid = AID_MEDIA_OBB;
+		else
+			uid = multiuser_get_uid(data->userid, sbi->options.fs_low_uid);
+	} else {
+		uid = sbi->options.fs_low_uid;
+	}
+	cred->fsuid = uid;
 	cred->fsgid = sbi->options.fs_low_gid;
 
 	old_cred = override_creds(cred);

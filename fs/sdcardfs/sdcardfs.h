@@ -185,6 +185,12 @@ struct sdcardfs_mount_options {
 	uid_t fs_low_uid;
 	gid_t fs_low_gid;
 	userid_t fs_user_id;
+	bool multiuser;
+	bool gid_derivation;
+	unsigned int reserved_mb;
+};
+
+struct sdcardfs_vfsmount_options {
 	gid_t gid;
 	mode_t mask;
 	bool multiuser;
